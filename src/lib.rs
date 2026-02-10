@@ -79,7 +79,7 @@ behind Windows Hello verification (fingerprint, face recognition, or PIN).
 
 To require biometric verification for an entry, pass the `require-biometric` modifier
 set to `"true"` when building the entry:
-```
+```ignore
 let modifiers = HashMap::from([("require-biometric", "true")]);
 let entry = store.build("my-service", "my-user", Some(&modifiers)).unwrap();
 ```
@@ -93,7 +93,7 @@ Windows Credential Manager. The biometric check ensures user presence before all
 access through this API, but does not provide hardware-level cryptographic binding.
 
 You can check if Windows Hello is available at runtime:
-```
+```no_run
 #[cfg(feature = "biometric")]
 if windows_native_keyring_store::biometric::is_available() {
     // biometric verification is supported
