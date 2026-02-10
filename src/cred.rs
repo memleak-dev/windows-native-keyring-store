@@ -24,6 +24,7 @@ pub(crate) struct Cred {
     pub target_name: String,
     pub specifiers: Option<(String, String)>,
     pub persistence: CredPersist,
+    pub require_biometric: bool,
 }
 
 impl Cred {
@@ -39,6 +40,7 @@ impl Cred {
         service: &str,
         user: &str,
         persistence: CredPersist,
+        require_biometric: bool,
     ) -> Result<Self> {
         let (target_name, specifiers) = match target {
             Some(value) => (value.to_string(), None),
@@ -68,7 +70,33 @@ impl Cred {
             target_name,
             specifiers,
             persistence,
+            require_biometric,
         })
+    }
+
+    /// Verify biometric identity if required for this credential.
+    /// When the `biometric` feature is not enabled and biometric is required,
+    /// this returns an error indicating the feature is not available.
+    fn verify_biometric_if_required(&self) -> Result<()> {
+        if !self.require_biometric {
+            return Ok(());
+        }
+        #[cfg(feature = "biometric")]
+        {
+            let message = if let Some((service, user)) = &self.specifiers {
+                format!("Authenticate to access credential for '{user}' on '{service}'")
+            } else {
+                format!("Authenticate to access credential '{}'", self.target_name)
+            };
+            crate::biometric::verify_user(&message)
+        }
+        #[cfg(not(feature = "biometric"))]
+        {
+            Err(ErrorCode::NoStorageAccess(Box::new(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "biometric feature is not enabled",
+            ))))
+        }
     }
 }
 
@@ -80,8 +108,9 @@ impl CredentialApi for Cred {
     // Windows credential APIs.  But the storage for the credential is actually
     // a little-endian blob, because Windows credentials can contain anything.
     fn set_password(&self, password: &str) -> Result<()> {
+        self.verify_biometric_if_required()?;
         let mut secret = validate_password(password)?;
-        let result = self.set_secret(&secret);
+        let result = self.set_secret_internal(&secret);
         // make sure that the copy of the secret is erased
         secret.zeroize();
         result
@@ -89,36 +118,19 @@ impl CredentialApi for Cred {
 
     /// See the keyring-core API docs.
     fn set_secret(&self, secret: &[u8]) -> Result<()> {
-        validate_secret(secret)?;
-        let mut username = if let Some((_, user)) = &self.specifiers {
-            user.to_owned()
-        } else {
-            String::new()
-        };
-        let mut target_alias = String::new();
-        let mut comment = String::new();
-        if let Ok(attributes) = self.get_attributes() {
-            username = attributes["username"].clone();
-            target_alias = attributes["target_alias"].clone();
-            comment = attributes["comment"].clone();
-        }
-        save_credential(
-            &self.target_name,
-            &username,
-            &target_alias,
-            &comment,
-            secret,
-            &self.persistence,
-        )
+        self.verify_biometric_if_required()?;
+        self.set_secret_internal(secret)
     }
 
     /// See the keyring-core API docs.
     fn get_password(&self) -> Result<String> {
+        self.verify_biometric_if_required()?;
         extract_from_credential(&self.target_name, extract_password)
     }
 
     /// See the keyring-core API docs.
     fn get_secret(&self) -> Result<Vec<u8>> {
+        self.verify_biometric_if_required()?;
         extract_from_credential(&self.target_name, extract_secret)
     }
 
@@ -160,6 +172,7 @@ impl CredentialApi for Cred {
 
     /// See the keyring-core API docs.
     fn delete_credential(&self) -> Result<()> {
+        self.verify_biometric_if_required()?;
         delete_credential(&self.target_name)
     }
 
@@ -190,5 +203,33 @@ impl CredentialApi for Cred {
     /// See the keyring-core API docs.
     fn debug_fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         std::fmt::Debug::fmt(self, f)
+    }
+}
+
+impl Cred {
+    /// Internal set_secret that bypasses the biometric check.
+    /// Called by set_password (which already verified biometric) and set_secret.
+    fn set_secret_internal(&self, secret: &[u8]) -> Result<()> {
+        validate_secret(secret)?;
+        let mut username = if let Some((_, user)) = &self.specifiers {
+            user.to_owned()
+        } else {
+            String::new()
+        };
+        let mut target_alias = String::new();
+        let mut comment = String::new();
+        if let Ok(attributes) = self.get_attributes() {
+            username = attributes["username"].clone();
+            target_alias = attributes["target_alias"].clone();
+            comment = attributes["comment"].clone();
+        }
+        save_credential(
+            &self.target_name,
+            &username,
+            &target_alias,
+            &comment,
+            secret,
+            &self.persistence,
+        )
     }
 }

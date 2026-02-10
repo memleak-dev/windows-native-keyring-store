@@ -263,6 +263,7 @@ pub fn cred_from_credential(credential: &mut CREDENTIALW) -> Cred {
         target_name,
         specifiers: None,
         persistence,
+        require_biometric: false,
     }
 }
 

@@ -492,3 +492,89 @@ fn test_store_persistence() {
         CredentialPersistence::UntilDelete
     ));
 }
+
+#[test]
+fn test_biometric_entry_builds() {
+    SET_STORE.call_once(usually_goes_in_main);
+    let modifiers = HashMap::from([("require-biometric", "true")]);
+    let entry = Entry::new_with_modifiers("test-bio-build", "user", &modifiers);
+    assert!(entry.is_ok(), "Should be able to build a biometric entry");
+}
+
+#[test]
+fn test_non_biometric_entry_unaffected() {
+    let name = generate_random_string();
+    let entry = entry_new(&name, &name);
+    test_round_trip("non-biometric still works", &entry, "no bio needed");
+}
+
+#[cfg(feature = "biometric")]
+#[test]
+fn test_biometric_availability() {
+    let available = crate::biometric::is_available();
+    println!("Windows Hello available: {available}");
+}
+
+#[cfg(feature = "biometric")]
+#[test]
+#[ignore] // requires user interaction with Windows Hello
+fn test_biometric_round_trip_password() {
+    SET_STORE.call_once(usually_goes_in_main);
+    let name = generate_random_string();
+    let modifiers = HashMap::from([("require-biometric", "true")]);
+    let entry = entry_new_with_modifiers(&name, &name, &modifiers);
+    println!("Setting password (will prompt for Windows Hello)...");
+    entry
+        .set_password("biometric-protected-password")
+        .expect("set_password with biometric should succeed");
+    println!("Getting password (will prompt for Windows Hello)...");
+    let password = entry
+        .get_password()
+        .expect("get_password with biometric should succeed");
+    assert_eq!(password, "biometric-protected-password");
+    println!("Deleting credential (will prompt for Windows Hello)...");
+    entry
+        .delete_credential()
+        .expect("delete_credential with biometric should succeed");
+    assert!(matches!(entry.get_password(), Err(Error::NoEntry) | Err(Error::NoStorageAccess(_))));
+}
+
+#[cfg(feature = "biometric")]
+#[test]
+#[ignore] // requires user interaction with Windows Hello
+fn test_biometric_round_trip_secret() {
+    SET_STORE.call_once(usually_goes_in_main);
+    let name = generate_random_string();
+    let modifiers = HashMap::from([("require-biometric", "true")]);
+    let entry = entry_new_with_modifiers(&name, &name, &modifiers);
+    let secret = generate_random_bytes();
+    println!("Setting secret (will prompt for Windows Hello)...");
+    entry
+        .set_secret(&secret)
+        .expect("set_secret with biometric should succeed");
+    println!("Getting secret (will prompt for Windows Hello)...");
+    let out_secret = entry
+        .get_secret()
+        .expect("get_secret with biometric should succeed");
+    assert_eq!(secret, out_secret);
+    println!("Deleting credential (will prompt for Windows Hello)...");
+    entry
+        .delete_credential()
+        .expect("delete_credential with biometric should succeed");
+}
+
+#[cfg(feature = "biometric")]
+#[test]
+fn test_biometric_get_attributes_no_prompt() {
+    SET_STORE.call_once(usually_goes_in_main);
+    let name = generate_random_string();
+    let modifiers = HashMap::from([("require-biometric", "true")]);
+    let entry = entry_new_with_modifiers(&name, &name, &modifiers);
+    // set_password requires biometric, so use a non-bio entry to seed the credential
+    let plain_entry = entry_new(&name, &name);
+    plain_entry.set_password("test").unwrap();
+    // get_attributes should NOT prompt for biometric
+    let attrs = entry.get_attributes().unwrap();
+    assert_eq!(attrs["username"], name);
+    plain_entry.delete_credential().unwrap();
+}

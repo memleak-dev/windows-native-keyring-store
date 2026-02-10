@@ -72,6 +72,34 @@ have its own conventions for delimiters used when forming the `target_name`.
 Thus, a search in one store may return a wrapper/specifier for an existing credential
 but that same search in another store may return a wrapper that is *not* a specifier.
 
+## Biometric Protection (Windows Hello)
+
+When built with the `biometric` feature, this crate supports gating credential access
+behind Windows Hello verification (fingerprint, face recognition, or PIN).
+
+To require biometric verification for an entry, pass the `require-biometric` modifier
+set to `"true"` when building the entry:
+```
+let modifiers = HashMap::from([("require-biometric", "true")]);
+let entry = store.build("my-service", "my-user", Some(&modifiers)).unwrap();
+```
+
+When biometric is required, `set_password`, `set_secret`, `get_password`, `get_secret`,
+and `delete_credential` will all prompt for Windows Hello verification before proceeding.
+`get_attributes` does not require biometric verification since it does not access the secret.
+
+Note that this is a UI-level gate — the credential itself is stored in the regular
+Windows Credential Manager. The biometric check ensures user presence before allowing
+access through this API, but does not provide hardware-level cryptographic binding.
+
+You can check if Windows Hello is available at runtime:
+```
+#[cfg(feature = "biometric")]
+if windows_native_keyring_store::biometric::is_available() {
+    // biometric verification is supported
+}
+```
+
 ## Warnings
 
 Tests show that operating on the same entry from different threads
@@ -92,6 +120,8 @@ pub mod cred;
 pub use cred::CredPersist;
 pub mod store;
 pub use store::Store;
+#[cfg(feature = "biometric")]
+pub mod biometric;
 #[cfg(test)]
 mod tests;
 mod utils;
