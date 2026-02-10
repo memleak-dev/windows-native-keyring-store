@@ -21,7 +21,7 @@ keyring-core = { version = "0.7.2" }
 byteorder = "1.5.0"
 regex = "1.12.2"
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security_Credentials"] }
-windows = { version = "0.61", features = ["Security_Credentials_UI", "Foundation"], optional = true }
+windows = { version = "0.61", features = ["Security_Credentials_UI"], optional = true }
 zeroize = "1.8.2"
 
 [dev-dependencies]

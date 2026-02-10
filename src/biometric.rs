@@ -1,5 +1,3 @@
-use std::sync::mpsc;
-
 use windows::Security::Credentials::UI::{
     UserConsentVerificationResult, UserConsentVerifier, UserConsentVerifierAvailability,
 };
@@ -34,28 +32,13 @@ impl std::fmt::Display for BiometricError {
 
 impl std::error::Error for BiometricError {}
 
-/// Block on a WinRT `IAsyncOperation` by waiting on a channel.
-fn block_on_async<T: windows::core::RuntimeType>(
-    op: windows::Foundation::IAsyncOperation<T>,
-) -> windows::core::Result<T> {
-    let (tx, rx) = mpsc::channel();
-    op.SetCompleted(&windows::Foundation::AsyncOperationCompletedHandler::new(
-        move |_, _| {
-            let _ = tx.send(());
-            Ok(())
-        },
-    ))?;
-    let _ = rx.recv();
-    op.GetResults()
-}
-
 /// Check if Windows Hello biometric verification is available on this device.
 pub fn is_available() -> bool {
     let op = match UserConsentVerifier::CheckAvailabilityAsync() {
         Ok(op) => op,
         Err(_) => return false,
     };
-    match block_on_async(op) {
+    match op.get() {
         Ok(availability) => availability == UserConsentVerifierAvailability::Available,
         Err(_) => false,
     }
@@ -69,8 +52,7 @@ pub fn verify_user(message: &str) -> Result<()> {
     let op = UserConsentVerifier::RequestVerificationAsync(&message.into())
         .map_err(|e| Error::PlatformFailure(Box::new(e)))?;
 
-    let result =
-        block_on_async(op).map_err(|e| Error::PlatformFailure(Box::new(e)))?;
+    let result = op.get().map_err(|e| Error::PlatformFailure(Box::new(e)))?;
 
     match result {
         UserConsentVerificationResult::Verified => Ok(()),
