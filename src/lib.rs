@@ -74,10 +74,13 @@ but that same search in another store may return a wrapper that is *not* a speci
 
 ## Biometric Protection (Windows Hello)
 
-When built with the `biometric` feature, this crate supports gating credential access
-behind Windows Hello verification (fingerprint, face recognition, or PIN).
+This crate supports TPM-backed biometric credential protection via Windows Hello.
+When enabled, credentials are encrypted using AES-256-GCM with a key derived from
+a TPM-resident NGC (Next Generation Credential) signing key. The encryption key
+is derived by signing a deterministic challenge with the NGC key (which requires
+biometric authentication) and hashing the signature.
 
-To require biometric verification for an entry, pass the `require-biometric` modifier
+To require biometric protection for an entry, pass the `require-biometric` modifier
 set to `"true"` when building the entry:
 ```ignore
 let modifiers = HashMap::from([("require-biometric", "true")]);
@@ -88,17 +91,38 @@ When biometric is required, `set_password`, `set_secret`, `get_password`, `get_s
 and `delete_credential` will all prompt for Windows Hello verification before proceeding.
 `get_attributes` does not require biometric verification since it does not access the secret.
 
-Note that this is a UI-level gate — the credential itself is stored in the regular
-Windows Credential Manager. The biometric check ensures user presence before allowing
-access through this API, but does not provide hardware-level cryptographic binding.
+### How it works
 
-You can check if Windows Hello is available at runtime:
-```no_run
-#[cfg(feature = "biometric")]
-if windows_native_keyring_store::biometric::is_available() {
-    // biometric verification is supported
-}
-```
+- **First write**: Creates an NGC key (biometric prompt) and signs a challenge
+  (second biometric prompt) to derive the encryption key.
+- **Subsequent writes/reads**: Opens the existing NGC key (no prompt) and signs
+  the challenge (one biometric prompt) to derive the encryption/decryption key.
+- **Attribute updates**: Do not require biometric authentication. The encrypted
+  blob is passed through unchanged.
+
+### Persistence of biometric intent
+
+When a credential is saved with biometric protection, a marker (`[keyring:biometric]`)
+is written into the credential's `comment` attribute. This allows clients to detect
+that a credential requires biometric authentication without attempting decryption.
+Credentials returned from [search](CredentialStoreApi::search) also detect the stored
+marker.
+
+### Limitations
+
+- **Key lifecycle**: NGC keys are tied to the Windows Hello enrollment. If a user
+  re-enrolls Windows Hello (e.g., resets PIN, removes and re-adds fingerprint),
+  all NGC keys are destroyed and encrypted credentials become **permanently
+  unrecoverable**. Applications should document this risk and provide credential
+  recovery mechanisms.
+- **App isolation**: NGC keys are only isolated per-app for MSIX-packaged
+  applications. Unpackaged desktop apps share a key namespace, meaning any
+  unpackaged app running as the same user could potentially use the same NGC key
+  name to derive the decryption key (though biometric verification is still
+  required). True per-app isolation requires distributing your application as an
+  MSIX package.
+- **Platform support**: Requires Windows 10+ with a TPM (or software-emulated
+  NGC). Use [`biometric::is_ngc_supported`] to check availability at runtime.
 
 ## Warnings
 
@@ -120,8 +144,8 @@ pub mod cred;
 pub use cred::CredPersist;
 pub mod store;
 pub use store::Store;
-#[cfg(feature = "biometric")]
 pub mod biometric;
+pub(crate) mod crypto;
 #[cfg(test)]
 mod tests;
 mod utils;
