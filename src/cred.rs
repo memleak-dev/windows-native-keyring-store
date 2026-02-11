@@ -11,9 +11,9 @@ use keyring_core::{Credential, Error as ErrorCode, Result};
 
 pub use crate::utils::CredPersist;
 use crate::utils::{
-    delete_credential, extract_attributes, extract_from_credential, extract_password,
+    decode_utf16_password, delete_credential, extract_attributes, extract_from_credential,
     extract_secret, save_credential, validate_attributes, validate_password, validate_secret,
-    validate_target,
+    validate_secret_for_encryption, validate_target, BIOMETRIC_MARKER,
 };
 
 /// Cred specifies or wraps a generic credential.
@@ -74,28 +74,35 @@ impl Cred {
         })
     }
 
-    /// Verify biometric identity if required for this credential.
-    /// When the `biometric` feature is not enabled and biometric is required,
-    /// this returns an error indicating the feature is not available.
-    fn verify_biometric_if_required(&self) -> Result<()> {
-        if !self.require_biometric {
-            return Ok(());
+    /// Check if the stored credential has the biometric marker in its comment.
+    /// Returns false if the credential does not exist yet or cannot be read.
+    fn has_stored_biometric_marker(&self) -> bool {
+        match extract_from_credential(&self.target_name, extract_attributes) {
+            Ok(attrs) => attrs
+                .get("comment")
+                .is_some_and(|c| c.contains(BIOMETRIC_MARKER)),
+            Err(_) => false,
         }
-        #[cfg(feature = "biometric")]
-        {
-            let message = if let Some((service, user)) = &self.specifiers {
-                format!("Authenticate to access credential for '{user}' on '{service}'")
-            } else {
-                format!("Authenticate to access credential '{}'", self.target_name)
-            };
-            crate::biometric::verify_user(&message)
-        }
-        #[cfg(not(feature = "biometric"))]
-        {
-            Err(ErrorCode::NoStorageAccess(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "biometric feature is not enabled",
-            ))))
+    }
+
+    fn encrypt_secret(&self, secret: &[u8]) -> Result<Vec<u8>> {
+        validate_secret_for_encryption(secret)?;
+        let ngc_key = crate::crypto::ensure_ngc_key(&self.target_name)?;
+        let mut aes_key = crate::crypto::derive_aes_key(&ngc_key, &self.target_name)?;
+        let result = crate::crypto::encrypt(&aes_key, secret);
+        aes_key.zeroize();
+        result
+    }
+
+    fn decrypt_or_verify(&self, blob: Vec<u8>) -> Result<Vec<u8>> {
+        if crate::crypto::is_encrypted(&blob) {
+            let ngc_key = crate::crypto::open_ngc_key(&self.target_name)?;
+            let mut aes_key = crate::crypto::derive_aes_key(&ngc_key, &self.target_name)?;
+            let result = crate::crypto::decrypt(&aes_key, &blob);
+            aes_key.zeroize();
+            result
+        } else {
+            Ok(blob)
         }
     }
 }
@@ -108,30 +115,30 @@ impl CredentialApi for Cred {
     // Windows credential APIs.  But the storage for the credential is actually
     // a little-endian blob, because Windows credentials can contain anything.
     fn set_password(&self, password: &str) -> Result<()> {
-        self.verify_biometric_if_required()?;
         let mut secret = validate_password(password)?;
         let result = self.set_secret_internal(&secret);
-        // make sure that the copy of the secret is erased
         secret.zeroize();
         result
     }
 
     /// See the keyring-core API docs.
     fn set_secret(&self, secret: &[u8]) -> Result<()> {
-        self.verify_biometric_if_required()?;
         self.set_secret_internal(secret)
     }
 
     /// See the keyring-core API docs.
     fn get_password(&self) -> Result<String> {
-        self.verify_biometric_if_required()?;
-        extract_from_credential(&self.target_name, extract_password)
+        let blob = extract_from_credential(&self.target_name, extract_secret)?;
+        let mut decrypted = self.decrypt_or_verify(blob)?;
+        let result = decode_utf16_password(&decrypted);
+        decrypted.zeroize();
+        result
     }
 
     /// See the keyring-core API docs.
     fn get_secret(&self) -> Result<Vec<u8>> {
-        self.verify_biometric_if_required()?;
-        extract_from_credential(&self.target_name, extract_secret)
+        let blob = extract_from_credential(&self.target_name, extract_secret)?;
+        self.decrypt_or_verify(blob)
     }
 
     /// See the keyring-core API docs.
@@ -156,36 +163,41 @@ impl CredentialApi for Cred {
             .cloned()
             .unwrap_or_else(|| old["comment"].clone());
         validate_attributes(&username, &target_alias, &comment)?;
-        let mut secret = self.get_secret()?;
+        let mut raw_blob = extract_from_credential(&self.target_name, extract_secret)?;
         let result = save_credential(
             &self.target_name,
             &username,
             &target_alias,
             &comment,
-            &secret,
+            &raw_blob,
             &self.persistence,
         );
-        // erase the copy of the secret
-        secret.zeroize();
+        raw_blob.zeroize();
         result
     }
 
     /// See the keyring-core API docs.
     fn delete_credential(&self) -> Result<()> {
-        self.verify_biometric_if_required()?;
-        delete_credential(&self.target_name)
+        delete_credential(&self.target_name)?;
+        crate::crypto::delete_ngc_key(&self.target_name);
+        Ok(())
     }
 
     /// See the keyring-core API docs.
     ///
     /// No ambiguity, so every wrap is its own wrapper
     fn get_credential(&self) -> Result<Option<Arc<Credential>>> {
-        let persistence: CredPersist = self.get_attributes()?["persistence"].parse()?;
-        if self.persistence == persistence {
+        let attrs = self.get_attributes()?;
+        let persistence: CredPersist = attrs["persistence"].parse()?;
+        let stored_biometric = attrs
+            .get("comment")
+            .is_some_and(|c| c.contains(BIOMETRIC_MARKER));
+        if self.persistence == persistence && self.require_biometric == stored_biometric {
             Ok(None)
         } else {
             let mut new = self.clone();
             new.persistence = persistence;
+            new.require_biometric = stored_biometric;
             Ok(Some(Arc::new(new)))
         }
     }
@@ -207,10 +219,16 @@ impl CredentialApi for Cred {
 }
 
 impl Cred {
-    /// Internal set_secret that bypasses the biometric check.
-    /// Called by set_password (which already verified biometric) and set_secret.
     fn set_secret_internal(&self, secret: &[u8]) -> Result<()> {
-        validate_secret(secret)?;
+        let effective_biometric = self.require_biometric || self.has_stored_biometric_marker();
+
+        let blob = if effective_biometric {
+            self.encrypt_secret(secret)?
+        } else {
+            validate_secret(secret)?;
+            secret.to_vec()
+        };
+
         let mut username = if let Some((_, user)) = &self.specifiers {
             user.to_owned()
         } else {
@@ -223,13 +241,22 @@ impl Cred {
             target_alias = attributes["target_alias"].clone();
             comment = attributes["comment"].clone();
         }
-        save_credential(
+        if effective_biometric && !comment.contains(BIOMETRIC_MARKER) {
+            if comment.is_empty() {
+                comment = BIOMETRIC_MARKER.to_string();
+            } else {
+                comment = format!("{BIOMETRIC_MARKER} {comment}");
+            }
+        }
+        let result = save_credential(
             &self.target_name,
             &username,
             &target_alias,
             &comment,
-            secret,
+            &blob,
             &self.persistence,
-        )
+        );
+        drop(blob);
+        result
     }
 }
